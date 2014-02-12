@@ -22,11 +22,12 @@ import subprocess
 import re
 import time
 import logging
+import signal
 
-zbx_api_host = '1.1.1.1'
+zbx_api_host = '10.2.201.6'
 zbx_api_url = 'http://%s/api_jsonrpc.php' % zbx_api_host
-zbx_api_user = 'user'
-zbx_api_pass = 'pass'
+zbx_api_user = 'wanguard'
+zbx_api_pass = '6MGHFxe5TJEbVvF2'
 
 wg_host = 'wanguard' # host used in zabbix
 wg_app = 'wanguard' # application used in zabbix
@@ -34,10 +35,16 @@ zbx_item_name = 'anomaly' # item pattern used in zabbix
 zbx_item_key = 'anomaly' # item key pattern used in zabbix
 
 logfile = '/var/log/wanguard-notify.log'
-zabbix_sender = '/usr/bin/zabbix_sender'
+connection_timeout = 5
 
 class ZabbixAPIError(Exception):
     pass
+
+class Alarm(Exception):
+    pass
+
+def alarm_handler(signum, frame):
+	raise Alarm
 
 class ZabbixConnection:
 	__api_url = None
@@ -56,7 +63,16 @@ class ZabbixConnection:
 			'Content-Type': 'application/json-rpc',
 			'User-Agent': 'ZabbixAPI Client',
 		}
-		r = requests.post(self.__api_url, data=json_data, headers=headers)
+
+		signal.signal(signal.SIGALRM, alarm_handler)
+		signal.alarm(connection_timeout)
+		try:
+			r = requests.post(self.__api_url, data=json_data, headers=headers, timeout=connection_timeout)
+			signal.alarm(0)
+		except requests.exceptions.ConnectionError:
+			raise ZabbixAPIError('HTTP connection error')
+		except Alarm:
+			raise ZabbixAPIError('HTTP connection timeout')
 
 		if r.status_code == 200 and r.content != '':
 			c = json.loads(r.content)
@@ -68,7 +84,7 @@ class ZabbixConnection:
 			else:
 				raise ZabbixAPIError('Wrong API result')
 		else:
-			raise ZabbixAPIError('Wrong API response content')
+			raise ZabbixAPIError('Wrong API response content: HTTP code %s' % r.status_code)
 
 	def __auth(self):
 		req = {
@@ -78,7 +94,7 @@ class ZabbixConnection:
 				'user': self.__api_user,
 				'password': self.__api_pass,
 			},
-			'id': 0,
+			'id': '0',
 		}
 
 		token = self.__callAPI(json.dumps(req))
@@ -180,7 +196,7 @@ class ZabbixAPI:
 				'interfaceid': hostinterfaceid,
 				'applications': [appid],
 				'delay': '60',
-				'history': '1',
+				'history': '0',
 			},
 		}
 
@@ -205,13 +221,50 @@ class ZabbixAPI:
 		else:
 			return False
 
-	def create_trigger(self, hostname, item_key):
+	def __prepare_trigger(self, anomaly, hostname, item_key):
+		m = re.match(r'\S+\s+\[(.*)\]', anomaly['sensor'])
+		if m:
+			anomaly['sensor'] = m.group(1)
+
+		perc = int(round(float(anomaly['severity']) * 100))
+		if perc <= 110:
+			severity = 2
+		elif perc > 110 and perc <= 150:
+			severity = 3
+		elif perc > 150:
+			severity = 4
+
+		if anomaly['direction'] == 'incoming':
+			direction = '->'
+		elif anomaly['direction'] == 'outgoing':
+			direction = '<-'
+
+		name = '#%s %s %s%s [%s %s] = %s%%' %(
+			anomaly['id'],
+			anomaly['sensor'],
+			direction, anomaly['ip'],
+			anomaly['decoder'],
+			anomaly['unit'],
+			perc
+		)
+
+		expression = self.__prepare_trigger_expression(hostname, item_key)
+
+		return (name, severity, expression)
+
+	def __prepare_trigger_expression(self, hostname, item_key):
+		expression = '{%s:%s.now()}>0' %(hostname, item_key)
+		return expression
+
+	def create_trigger(self, hostname, item_key, anomaly):
+		name, severity, expression = self.__prepare_trigger(anomaly, hostname, item_key)
+
 		req = {
 			'method': 'trigger.create',
 			'params': {
-				'description': '{ITEM.LASTVALUE}',
-				'expression': '{%s:%s.regexp(^$)}=0' %(hostname, item_key),
-				'priority': '4',
+				'description': name,
+				'expression': expression,
+				'priority': severity,
 			},
 		}
 
@@ -222,10 +275,11 @@ class ZabbixAPI:
 			raise ZabbixAPIError('Error: cannot create trigger on item key %s on host %s' %(item_key, hostname))
 
 	def exists_trigger(self, hostname, item_key):
+		expression = self.__prepare_trigger_expression(hostname, item_key)
 		req = {
 			'method': 'trigger.exists',
 			'params': {
-				'expression': '{%s:%s.regexp(^$)}=0' %(hostname, item_key),
+				'expression': expression,
 				'host': hostname,
 			},
 		}
@@ -267,56 +321,6 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot delete item %s on host %s' %(name, hostname))
 
-class ZabbixSender:
-
-	@staticmethod
-	def send(anomaly, wg_host, item_key):
-		m = re.match(r'\S+\s+\[(.*)\]', anomaly['sensor'])
-		if m:
-			anomaly['sensor'] = m.group(1)
-
-		perc = int(round(float(anomaly['severity']) * 100))
-
-		if anomaly['direction'] == 'incoming':
-			direction = '->'
-		elif anomaly['direction'] == 'outgoing':
-			direction = '<-'
-
-		item_value = '#%s (%s) %s%s (%s %s = %s%%)' %(anomaly['id'], anomaly['sensor'], direction, anomaly['ip'], anomaly['decoder'], anomaly['unit'], perc)
-
-		cmd = [zabbix_sender, '-z', zbx_api_host, '-s', wg_host, '-k', item_key, '-o', item_value]
-
-		time.sleep(30)
-		success = False
-		logging.debug('ID: %s, executing shell command: ' % anomaly['id'] + ' '.join(cmd))
-		for i in range(1,30):
-			logging.debug('ID: %s, iteration %s: executing shell command: ' %(anomaly['id'], i) + ' '.join(cmd))
-			try:
-				output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-
-			except subprocess.CalledProcessError as e:
-				if re.search(r'processed: 0; failed: 1;', e.output):
-					logging.debug('ID: %s, iteration %s: zabbix_sender result fail: %s' %(anomaly['id'], i, e.output))
-					time.sleep(5)
-					continue
-				else:
-					raise
-
-			if re.search(r'processed: 1; failed: 0', output):
-				success = True
-				break
-			else:
-				logging.debug('ID: %s, iteration %s: zabbix_sender result fail: %s' %(anomaly['id'], i, output))
-				time.sleep(5)
-				continue
-
-		if success:
-			logging.info('ID: %s, success after %s iterations, zabbix_sender finished successfully: %s' %(anomaly['id'], i, output))
-			return True
-		else:
-			logging.error('ID: %s, after %s iterations zabbix_sender fail' %(anomaly['id'], i))
-			return False
-
 ## MAIN
 
 requests_log = logging.getLogger('requests')
@@ -327,8 +331,12 @@ if len(sys.argv) != 3 and len(sys.argv) != 9:
 	logging.error('Wrong program execution parameters: ' + ' '.join(sys.argv))
 	sys.exit('Usage: %s [add|del] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
 
-logging.info('Program excution: ' + ' '.join(sys.argv))
-za = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
+logging.info('Program execution: ' + ' '.join(sys.argv))
+try:
+	za = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
+except ZabbixAPIError as e:
+	logging.error(e.message)
+	sys.exit(1)
 
 action = sys.argv[1]
 if action == 'add':
@@ -345,7 +353,7 @@ if action == 'add':
 	item_name = '%s %s' %(zbx_item_name, anomaly['id'])
 	item_key = '%s.%s' %(zbx_item_key, anomaly['id'])
 
-	logging.debug('API invocation: create item: %s, item key %s on %s (%s)' %(item_name, item_key, wg_host, wg_app))
+	logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, wg_host))
 	try:
 		za.create_item(wg_host, wg_app, item_name, item_key)
 	except ZabbixAPIError as e:
@@ -356,20 +364,12 @@ if action == 'add':
 
 	logging.debug('API invocation: create trigger on item key: %s on %s' %(item_key, wg_host))
 	try:
-		za.create_trigger(wg_host, item_key)
+		za.create_trigger(wg_host, item_key, anomaly)
 	except ZabbixAPIError as e:
 		logging.warning(e.message)
 		if not za.exists_trigger(wg_host, item_key):
 			logging.error('No trigger for item %s, exiting' % item_key)
 			sys.exit(1)
-
-	try:
-		if not ZabbixSender.send(anomaly, wg_host, item_key):
-			sys.exit(1)
-	except OSError as e:
-		logging.error('ID: %s, shell command execution fail, code: %s, error: %s' %(anomaly['id'], e.errno, e.strerror))
-	except subprocess.CalledProcessError as e:
-		logging.error('ID: %s, shell command execution fail: %s' %(anomaly['id'], e.output))
 
 elif action == 'del':
 	anomaly = {'id': sys.argv[2]}
