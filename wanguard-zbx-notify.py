@@ -24,10 +24,10 @@ import time
 import logging
 import signal
 
-zbx_api_host = '10.2.201.6'
+zbx_api_host = '1.1.1.1'
 zbx_api_url = 'http://%s/api_jsonrpc.php' % zbx_api_host
-zbx_api_user = 'wanguard'
-zbx_api_pass = '6MGHFxe5TJEbVvF2'
+zbx_api_user = 'user'
+zbx_api_pass = 'pass'
 
 wg_host = 'wanguard' # host used in zabbix
 wg_app = 'wanguard' # application used in zabbix
