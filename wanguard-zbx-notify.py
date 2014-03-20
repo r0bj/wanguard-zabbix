@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-# Copyright (c) 2012-2014 Robert Jerzak
+# Copyright (c) 2013-2014 Robert Jerzak
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -28,6 +28,9 @@ zbx_api_host = '1.1.1.1'
 zbx_api_url = 'http://%s/api_jsonrpc.php' % zbx_api_host
 zbx_api_user = 'user'
 zbx_api_pass = 'pass'
+
+zbx_trigger_warning = 150 # percent above thhreshold
+zbx_trigger_average = 250 # percent above thhreshold
 
 wg_host = 'wanguard' # host used in zabbix
 wg_app = 'wanguard' # application used in zabbix
@@ -82,9 +85,9 @@ class ZabbixConnection:
 			elif 'result' in c:
 				return c['result']
 			else:
-				raise ZabbixAPIError('Wrong API result')
+				raise ZabbixAPIError('Wrong API result, json sent: %s' % json_data)
 		else:
-			raise ZabbixAPIError('Wrong API response content: HTTP code %s' % r.status_code)
+			raise ZabbixAPIError('Wrong API response content: HTTP code %s, json sent: %s' %(r.status_code, json_data))
 
 	def __auth(self):
 		req = {
@@ -227,12 +230,12 @@ class ZabbixAPI:
 			anomaly['sensor'] = m.group(1)
 
 		perc = int(round(float(anomaly['severity']) * 100))
-		if perc <= 110:
-			severity = 2
-		elif perc > 110 and perc <= 150:
-			severity = 3
-		elif perc > 150:
-			severity = 4
+		if perc <= zbx_trigger_warning:
+			severity = 2 # warning
+		elif perc > zbx_trigger_warning and perc <= zbx_trigger_average:
+			severity = 3 # average
+		elif perc > zbx_trigger_average:
+			severity = 4 # high
 
 		if anomaly['direction'] == 'incoming':
 			direction = '->'
@@ -265,6 +268,7 @@ class ZabbixAPI:
 				'description': name,
 				'expression': expression,
 				'priority': severity,
+				#'status': 1,
 			},
 		}
 
@@ -333,7 +337,7 @@ if len(sys.argv) != 3 and len(sys.argv) != 9:
 
 logging.info('Program execution: ' + ' '.join(sys.argv))
 try:
-	za = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
+	zbx = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
 except ZabbixAPIError as e:
 	logging.error(e.message)
 	sys.exit(1)
@@ -355,19 +359,19 @@ if action == 'add':
 
 	logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, wg_host))
 	try:
-		za.create_item(wg_host, wg_app, item_name, item_key)
+		zbx.create_item(wg_host, wg_app, item_name, item_key)
 	except ZabbixAPIError as e:
 		logging.warning(e.message)
-		if not za.exists_item(wg_host, item_key):
+		if not zbx.exists_item(wg_host, item_key):
 			logging.error('No item %s, exiting' % item_key)
 			sys.exit(1)
 
 	logging.debug('API invocation: create trigger on item key: %s on %s' %(item_key, wg_host))
 	try:
-		za.create_trigger(wg_host, item_key, anomaly)
+		zbx.create_trigger(wg_host, item_key, anomaly)
 	except ZabbixAPIError as e:
 		logging.warning(e.message)
-		if not za.exists_trigger(wg_host, item_key):
+		if not zbx.exists_trigger(wg_host, item_key):
 			logging.error('No trigger for item %s, exiting' % item_key)
 			sys.exit(1)
 
@@ -378,6 +382,6 @@ elif action == 'del':
 
 	logging.info('API invocation: del item key %s on %s (%s)' %(item_key, wg_host, wg_app))
 	try:
-		za.del_item(wg_host, item_key)
+		zbx.del_item(wg_host, item_key)
 	except ZabbixAPIError as e:
 		logging.error(e.message)
