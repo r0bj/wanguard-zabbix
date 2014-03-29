@@ -29,8 +29,8 @@ zbx_api_url = 'http://%s/api_jsonrpc.php' % zbx_api_host
 zbx_api_user = 'user'
 zbx_api_pass = 'pass'
 
-zbx_trigger_warning = 150 # percent above thhreshold
-zbx_trigger_average = 250 # percent above thhreshold
+zbx_trigger_warning_ceil = 150 # percent above thhreshold
+zbx_trigger_average_ceil = 250 # percent above thhreshold
 
 wg_host = 'wanguard' # host used in zabbix
 wg_app = 'wanguard' # application used in zabbix
@@ -73,9 +73,9 @@ class ZabbixConnection:
 			r = requests.post(self.__api_url, data=json_data, headers=headers, timeout=connection_timeout)
 			signal.alarm(0)
 		except requests.exceptions.ConnectionError:
-			raise ZabbixAPIError('HTTP connection error')
+			raise ZabbixAPIError('HTTP connection error, json: %s' % self.remove_password(json_data))
 		except Alarm:
-			raise ZabbixAPIError('HTTP connection timeout')
+			raise ZabbixAPIError('HTTP connection timeout, json: %s' % self.remove_password(json_data))
 
 		if r.status_code == 200 and r.content != '':
 			c = json.loads(r.content)
@@ -85,9 +85,9 @@ class ZabbixConnection:
 			elif 'result' in c:
 				return c['result']
 			else:
-				raise ZabbixAPIError('Wrong API result, json sent: %s' % json_data)
+				raise ZabbixAPIError('Wrong API result, json: %s' % self.remove_password(json_data))
 		else:
-			raise ZabbixAPIError('Wrong API response content: HTTP code %s, json sent: %s' %(r.status_code, json_data))
+			raise ZabbixAPIError('Wrong API response content: HTTP code %s, json: %s' %(r.status_code, self.remove_password(json_data)))
 
 	def __auth(self):
 		req = {
@@ -105,6 +105,12 @@ class ZabbixConnection:
 			return token
 		else:
 			raise ZabbixAPIError('Wrong API auth token')
+
+	def remove_password(self, json_data):
+		dict = json.loads(json_data)
+		if 'params' in dict and 'password' in dict['params']:
+			dict['params']['password'] = 'XXX'
+		return json.dumps(dict)
 
 	def send(self, data):
 		data['auth'] = self.__api_token
@@ -230,11 +236,11 @@ class ZabbixAPI:
 			anomaly['sensor'] = m.group(1)
 
 		perc = int(round(float(anomaly['severity']) * 100))
-		if perc <= zbx_trigger_warning:
+		if perc <= zbx_trigger_warning_ceil:
 			severity = 2 # warning
-		elif perc > zbx_trigger_warning and perc <= zbx_trigger_average:
+		elif perc > zbx_trigger_warning_ceil and perc <= zbx_trigger_average_ceil:
 			severity = 3 # average
-		elif perc > zbx_trigger_average:
+		elif perc > zbx_trigger_average_ceil:
 			severity = 4 # high
 
 		if anomaly['direction'] == 'incoming':
@@ -327,20 +333,16 @@ class ZabbixAPI:
 
 ## MAIN
 
+def usage():
+	sys.exit('Usage: %s [add|del] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
+
 requests_log = logging.getLogger('requests')
 requests_log.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', filename=logfile, level=logging.DEBUG)
 
 if len(sys.argv) != 3 and len(sys.argv) != 9:
 	logging.error('Wrong program execution parameters: ' + ' '.join(sys.argv))
-	sys.exit('Usage: %s [add|del] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
-
-logging.info('Program execution: ' + ' '.join(sys.argv))
-try:
-	zbx = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
-except ZabbixAPIError as e:
-	logging.error(e.message)
-	sys.exit(1)
+	usage()
 
 action = sys.argv[1]
 if action == 'add':
@@ -354,6 +356,19 @@ if action == 'add':
 		'severity': sys.argv[8],
 	}
 
+elif action == 'del':
+	anomaly = {'id': sys.argv[2]}
+else:
+	usage()
+
+logging.info('Program execution: ' + ' '.join(sys.argv))
+try:
+	zbx = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
+except ZabbixAPIError as e:
+	logging.error(e.message + ', program execution: ' + ' '.join(sys.argv))
+	sys.exit(1)
+
+if action == 'add':
 	item_name = '%s %s' %(zbx_item_name, anomaly['id'])
 	item_key = '%s.%s' %(zbx_item_key, anomaly['id'])
 
