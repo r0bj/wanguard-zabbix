@@ -23,11 +23,8 @@ import re
 import time
 import logging
 import signal
-
-zbx_api_host = '1.1.1.1'
-zbx_api_url = 'http://%s/api_jsonrpc.php' % zbx_api_host
-zbx_api_user = 'user'
-zbx_api_pass = 'pass'
+import ConfigParser
+import os
 
 zbx_trigger_warning_ceil = 150 # percent above thhreshold
 zbx_trigger_average_ceil = 250 # percent above thhreshold
@@ -38,6 +35,7 @@ zbx_item_name = 'anomaly' # item pattern used in zabbix
 zbx_item_key = 'anomaly' # item key pattern used in zabbix
 
 logfile = '/var/log/wanguard-notify.log'
+conf_file = '/etc/wanguard-zbx-notify.conf'
 connection_timeout = 5
 
 class ZabbixAPIError(Exception):
@@ -336,9 +334,25 @@ class ZabbixAPI:
 def usage():
 	sys.exit('Usage: %s [add|del] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
 
+def parse_config(file):
+	if os.path.exists(file):
+		config = ConfigParser.ConfigParser()
+		config.read(file)
+		return dict(config.items('zabbix'))
+	else:
+		return None
+
 requests_log = logging.getLogger('requests')
 requests_log.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', filename=logfile, level=logging.DEBUG)
+
+conf = parse_config(conf_file)
+
+if not isinstance(conf, dict) or 'zabbix_api_host' not in conf or 'zabbix_api_user' not in conf or 'zabbix_api_pass' not in conf:
+	logging.error('Could not get data from config file %s' % conf_file)
+	sys.exit(1)
+
+conf['zabbix_api_url'] = 'http://%s/api_jsonrpc.php' % conf['zabbix_api_host']
 
 if len(sys.argv) != 3 and len(sys.argv) != 9:
 	logging.error('Wrong program execution parameters: ' + ' '.join(sys.argv))
@@ -363,7 +377,7 @@ else:
 
 logging.info('Program execution: ' + ' '.join(sys.argv))
 try:
-	zbx = ZabbixAPI(zbx_api_url, zbx_api_user, zbx_api_pass)
+	zbx = ZabbixAPI(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
 except ZabbixAPIError as e:
 	logging.error(e.message + ', program execution: ' + ' '.join(sys.argv))
 	sys.exit(1)
