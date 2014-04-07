@@ -25,6 +25,7 @@ import logging
 import signal
 import ConfigParser
 import os
+import pickle
 
 zbx_trigger_warning_ceil = 150 # percent above thhreshold
 zbx_trigger_average_ceil = 250 # percent above thhreshold
@@ -36,6 +37,7 @@ zbx_item_key = 'anomaly' # item key pattern used in zabbix
 
 logfile = '/var/log/wanguard-notify.log'
 conf_file = '/etc/wanguard-zbx-notify.conf'
+statefile = '/var/run/wanguard-notify'
 connection_timeout = 5
 
 class ZabbixAPIError(Exception):
@@ -187,7 +189,7 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot create application %s on hostid %s' %(name, hostid))
 
-	def create_item(self, hostname, app, item_name, item_key):
+	def __create_item(self, hostname, app, item_name, item_key):
 		hostid = self.__find_hostid(hostname)
 		hostinterfaceid = self.__find_hostinterfaceid_by_hostid(hostid)
 		appid = self.__find_applicationid_by_hostid(app, hostid)
@@ -212,6 +214,15 @@ class ZabbixAPI:
 			return result['itemids'][0]
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot create item %s on host %s' %(item_name, hostname))
+
+	def create_item(self, wg_host, wg_app, item_name, item_key):
+		try:
+			self.__create_item(wg_host, wg_app, item_name, item_key)
+		except ZabbixAPIError as e:
+			logging.warning(e.message)
+			if not self.exists_item(wg_host, item_key):
+				logging.error('No item %s, exiting' % item_key)
+				sys.exit(1)
 
 	def exists_item(self, hostname, item_key):
 		req = {
@@ -263,7 +274,7 @@ class ZabbixAPI:
 		expression = '{%s:%s.now()}>0' %(hostname, item_key)
 		return expression
 
-	def create_trigger(self, hostname, item_key, anomaly):
+	def __create_trigger(self, hostname, item_key, anomaly):
 		name, severity, expression = self.__prepare_trigger(anomaly, hostname, item_key)
 
 		req = {
@@ -276,13 +287,23 @@ class ZabbixAPI:
 			},
 		}
 
+		logging.debug('API invocation: create trigger on item key: %s: %s' %(item_key, name))
 		result = self.__zconn.send(req)
 		try:
 			return result['triggerids'][0]
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot create trigger on item key %s on host %s' %(item_key, hostname))
 
-	def exists_trigger(self, hostname, item_key):
+	def create_trigger(self, wg_host, item_key, anomaly):
+		try:
+			self.__create_trigger(wg_host, item_key, anomaly)
+		except ZabbixAPIError as e:
+			logging.warning(e.message)
+			if not self.__exists_trigger(wg_host, item_key):
+				logging.error('No trigger for item %s, exiting' % item_key)
+				sys.exit(1)
+
+	def __exists_trigger(self, hostname, item_key):
 		expression = self.__prepare_trigger_expression(hostname, item_key)
 		req = {
 			'method': 'trigger.exists',
@@ -329,10 +350,132 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot delete item %s on host %s' %(name, hostname))
 
+class Notification:
+	def __init__(self, url, user, passwd):
+		self.__load_data()
+		try:
+			self.__zbx = ZabbixAPI(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
+		except ZabbixAPIError as e:
+			logging.error('%s, program execution: %s' %(e.message, ' '.join(sys.argv)))
+			sys.exit(1)
+
+	def __load_data(self):
+		self.__zbx_item_name = zbx_item_name
+		self.__zbx_item_key = zbx_item_key
+		self.__wg_host = wg_host
+		self.__wg_app = wg_app
+		self.__statefile = statefile
+		self.__persisted_anomaly_ids = self.__load_anomalies()
+		self.__persisted_anomaly_ids_changed = None
+
+	def __gen_item_key(self, anomaly_id):
+		return '%s.%s' %(self.__zbx_item_key, anomaly_id)
+
+	def add_notification(self, anomaly):
+		item_name = '%s %s' %(self.__zbx_item_name, anomaly['id'])
+		item_key = self.__gen_item_key(anomaly['id'])
+
+		logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, self.__wg_host))
+		self.__zbx.create_item(self.__wg_host, self.__wg_app, item_name, item_key)
+		self.__zbx.create_trigger(self.__wg_host, item_key, anomaly)
+
+	def __del_notification(self, item_key):
+		try:
+			self.__zbx.del_item(self.__wg_host, item_key)
+			return True
+		except ZabbixAPIError as e:
+			logging.warning(e.message)
+
+			#return None
+
+			try:
+				if self.__zbx.exists_item(self.__wg_host, item_key):
+					logging.error('Cannot delete item %s' % item_key)
+					return None
+				else:
+					return True
+			except ZabbixAPIError as e:
+				logging.error(e.message)
+
+	def del_notification(self, anomaly):
+		item_key = self.__gen_item_key(anomaly['id'])
+
+		logging.info('API invocation: del item key %s on %s (%s)' %(item_key, self.__wg_host, self.__wg_app))
+		if self.__del_notification(item_key):
+			self.__remove_anomaly_id(anomaly['id'])
+		else:
+			self.__append_anomaly_id(anomaly['id'])
+
+	def clean_notification(self):
+		a = []
+		for id in self.__persisted_anomaly_ids:
+			if not self.__del_notification(self.__gen_item_key(id)):
+				a.append(id)
+
+		if len(self.__persisted_anomaly_ids) != len(a):
+			self.__persisted_anomaly_ids = a
+			self.__persisted_anomaly_ids_changed = True
+
+		self.__persists_anomalies()
+
+	def __append_anomaly_id(self, id):
+		if id not in self.__persisted_anomaly_ids:
+			self.__persisted_anomaly_ids.append(id)
+			self.__persisted_anomaly_ids_changed = True
+
+	def __remove_anomaly_id(self, id):
+		if id in self.__persisted_anomaly_ids:
+			try:
+				self.__persisted_anomaly_ids.remove(id)
+				self.__persisted_anomaly_ids_changed = True
+			except ValueError:
+				pass
+
+	def __persists_anomalies(self):
+		if self.__persisted_anomaly_ids_changed:
+			self.__store_anomalies(self.__persisted_anomaly_ids)
+
+	def __store_anomalies(self, anomalies):
+		if anomalies:
+			a = ', '.join(anomalies)
+		else:
+			a = 'none'
+		logging.debug('Storing faulty anomalies: %s' % a)
+
+		try:
+			file = open(self.__statefile, 'w')
+		except IOError:
+			logging.error('Cannot open file %s for writing' % self.__statefile)
+		try:
+			pickle.dump(anomalies, file)
+		except IOError:
+			logging.error('Cannot write file %s' % self.__statefile)
+		except PicklingError:
+			logging.error('Wrong data format')
+		file.close()
+
+	def __load_anomalies(self):
+		try:
+			file = open(self.__statefile, 'r')
+		except IOError:
+			return []
+		try:
+			a = pickle.load(file)
+			file.close()
+			if a:
+				logging.debug('Loaded faulty anomalies: %s' % ', '.join(a))
+				return a
+			else:
+				logging.debug('No faulty anomalies to load')
+				return []
+		except UnpicklingError:
+			os.remove(self.__statefile)
+			return []
+
 ## MAIN
 
 def usage():
-	sys.exit('Usage: %s [add|del] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
+	sys.exit('Usage: %s [add|del|clean] {anomaly_id} {sensor} {direction} {ip} {decoder} {unit} {severity}' % sys.argv[0])
 
 def parse_config(file):
 	if os.path.exists(file):
@@ -346,6 +489,7 @@ requests_log = logging.getLogger('requests')
 requests_log.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', filename=logfile, level=logging.DEBUG)
 
+logging.info('Program execution: ' + ' '.join(sys.argv))
 conf = parse_config(conf_file)
 
 if not isinstance(conf, dict) or 'zabbix_api_host' not in conf or 'zabbix_api_user' not in conf or 'zabbix_api_pass' not in conf:
@@ -354,8 +498,8 @@ if not isinstance(conf, dict) or 'zabbix_api_host' not in conf or 'zabbix_api_us
 
 conf['zabbix_api_url'] = 'http://%s/api_jsonrpc.php' % conf['zabbix_api_host']
 
-if len(sys.argv) != 3 and len(sys.argv) != 9:
-	logging.error('Wrong program execution parameters: ' + ' '.join(sys.argv))
+if len(sys.argv) != 2 and len(sys.argv) != 3 and len(sys.argv) != 9:
+	logging.error('Wrong program execution parameters: %s' % ' '.join(sys.argv))
 	usage()
 
 action = sys.argv[1]
@@ -372,45 +516,16 @@ if action == 'add':
 
 elif action == 'del':
 	anomaly = {'id': sys.argv[2]}
+elif action == 'clean':
+	pass
 else:
 	usage()
 
-logging.info('Program execution: ' + ' '.join(sys.argv))
-try:
-	zbx = ZabbixAPI(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
-except ZabbixAPIError as e:
-	logging.error(e.message + ', program execution: ' + ' '.join(sys.argv))
-	sys.exit(1)
+n = Notification(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
 
 if action == 'add':
-	item_name = '%s %s' %(zbx_item_name, anomaly['id'])
-	item_key = '%s.%s' %(zbx_item_key, anomaly['id'])
-
-	logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, wg_host))
-	try:
-		zbx.create_item(wg_host, wg_app, item_name, item_key)
-	except ZabbixAPIError as e:
-		logging.warning(e.message)
-		if not zbx.exists_item(wg_host, item_key):
-			logging.error('No item %s, exiting' % item_key)
-			sys.exit(1)
-
-	logging.debug('API invocation: create trigger on item key: %s on %s' %(item_key, wg_host))
-	try:
-		zbx.create_trigger(wg_host, item_key, anomaly)
-	except ZabbixAPIError as e:
-		logging.warning(e.message)
-		if not zbx.exists_trigger(wg_host, item_key):
-			logging.error('No trigger for item %s, exiting' % item_key)
-			sys.exit(1)
-
+	n.add_notification(anomaly)
 elif action == 'del':
-	anomaly = {'id': sys.argv[2]}
+	n.del_notification(anomaly)
 
-	item_key = '%s.%s' %(zbx_item_key, anomaly['id'])
-
-	logging.info('API invocation: del item key %s on %s (%s)' %(item_key, wg_host, wg_app))
-	try:
-		zbx.del_item(wg_host, item_key)
-	except ZabbixAPIError as e:
-		logging.error(e.message)
+n.clean_notification()
