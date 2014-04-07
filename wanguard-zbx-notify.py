@@ -442,17 +442,23 @@ class Notification:
 			a = 'none'
 		logging.debug('Storing faulty anomalies: %s' % a)
 
+		tmpfile = self.__statefile + '-' + str(os.getpid())
+
 		try:
-			file = open(self.__statefile, 'w')
+			file = open(tmpfile, 'w')
 		except IOError:
-			logging.error('Cannot open file %s for writing' % self.__statefile)
+			logging.error('Cannot open file %s for writing' % tmpfile)
 		try:
 			pickle.dump(anomalies, file)
 		except IOError:
-			logging.error('Cannot write file %s' % self.__statefile)
+			logging.error('Cannot write file %s' % tmpfile)
 		except PicklingError:
 			logging.error('Wrong data format')
+
+		file.flush()
+		os.fsync(file)
 		file.close()
+		os.rename(tmpfile, self.__statefile)
 
 	def __load_anomalies(self):
 		try:
