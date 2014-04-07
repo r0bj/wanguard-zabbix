@@ -448,17 +448,21 @@ class Notification:
 			file = open(tmpfile, 'w')
 		except IOError:
 			logging.error('Cannot open file %s for writing' % tmpfile)
+
 		try:
 			pickle.dump(anomalies, file)
+
+			# atomic write
+			file.flush()
+			os.fsync(file)
+			file.close()
+			os.rename(tmpfile, self.__statefile)
 		except IOError:
 			logging.error('Cannot write file %s' % tmpfile)
+			file.close()
 		except PicklingError:
 			logging.error('Wrong data format')
-
-		file.flush()
-		os.fsync(file)
-		file.close()
-		os.rename(tmpfile, self.__statefile)
+			file.close()
 
 	def __load_anomalies(self):
 		try:
