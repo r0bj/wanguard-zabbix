@@ -37,7 +37,7 @@ zbx_item_key = 'anomaly' # item key pattern used in zabbix
 
 logfile = '/var/log/wanguard-notify.log'
 conf_file = '/etc/wanguard-zbx-notify.conf'
-statefile = '/var/run/wanguard-notify'
+statefile = '/tmp/wanguard-notify'
 connection_timeout = 5
 
 class ZabbixAPIError(Exception):
@@ -445,6 +445,9 @@ class PersistData:
 		if self.__anomalies:
 			logging.debug('Saving faulty anomalies: %s' % self.__flatten_anomalies(self.__anomalies))
 
+		self.__save_anomalies(self.__anomalies)
+
+	def __save_anomalies(self, anomalies):
 		tmpfile = self.__statefile + '-' + str(os.getpid())
 
 		try:
@@ -454,7 +457,7 @@ class PersistData:
 			return
 
 		try:
-			pickle.dump(self.__anomalies, file)
+			pickle.dump(anomalies, file)
 		except IOError:
 			logging.error('Cannot write file %s' % tmpfile)
 		except pickle.PicklingError:
@@ -480,7 +483,7 @@ class PersistData:
 		except (pickle.UnpicklingError, AttributeError, EOFError, ImportError, IndexError):
 			logging.error('Unpickling error')
 			file.close()
-			os.remove(self.__statefile)
+			self.__save_anomalies([])
 			return []
 		finally:
 			file.close()
