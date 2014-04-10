@@ -68,9 +68,9 @@ class ZabbixConnection:
 			r = requests.post(self.__api_url, data=json_data, headers=headers, timeout=connection_timeout)
 			signal.alarm(0)
 		except requests.exceptions.ConnectionError:
-			raise ZabbixAPIError('HTTP connection error, json: %s' % self.remove_password(json_data))
+			raise ZabbixAPIError('HTTP connection error, json: %s' % self.__remove_password(json_data))
 		except Alarm:
-			raise ZabbixAPIError('HTTP connection timeout, json: %s' % self.remove_password(json_data))
+			raise ZabbixAPIError('HTTP connection timeout, json: %s' % self.__remove_password(json_data))
 
 		if r.status_code == 200 and r.content != '':
 			c = json.loads(r.content)
@@ -80,9 +80,9 @@ class ZabbixConnection:
 			elif 'result' in c:
 				return c['result']
 			else:
-				raise ZabbixAPIError('Wrong API result, json: %s' % self.remove_password(json_data))
+				raise ZabbixAPIError('Wrong API result, json: %s' % self.__remove_password(json_data))
 		else:
-			raise ZabbixAPIError('Wrong API response content: HTTP code %s, json: %s' %(r.status_code, self.remove_password(json_data)))
+			raise ZabbixAPIError('Wrong API response content: HTTP code %s, json: %s' %(r.status_code, self.__remove_password(json_data)))
 
 	def __auth(self):
 		req = {
@@ -101,7 +101,7 @@ class ZabbixConnection:
 		else:
 			raise ZabbixAPIError('Wrong API auth token')
 
-	def remove_password(self, json_data):
+	def __remove_password(self, json_data):
 		dict = json.loads(json_data)
 		if 'params' in dict and 'password' in dict['params']:
 			dict['params']['password'] = 'XXX'
@@ -417,7 +417,7 @@ class Notification:
 		else:
 			return None
 
-	def clean_notification(self):
+	def clean_notifications(self):
 		self.__pd.priority_anomalies()
 		for a in self.__pd.get_anomalies():
 			if a['action'] == 'add':
@@ -560,7 +560,7 @@ requests_log = logging.getLogger('requests')
 requests_log.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', filename=logfile, level=logging.DEBUG)
 
-logging.info('Program execution: ' + ' '.join(sys.argv))
+logging.debug('Program execution: ' + ' '.join(sys.argv))
 conf = parse_config(conf_file)
 
 if not isinstance(conf, dict) or 'zabbix_api_host' not in conf or 'zabbix_api_user' not in conf or 'zabbix_api_pass' not in conf:
@@ -610,4 +610,4 @@ elif action == 'del':
 	if not n.del_notification(anomaly):
 		pd.add_anomaly(anomaly)
 
-n.clean_notification()
+n.clean_notifications()
