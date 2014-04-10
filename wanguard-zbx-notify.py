@@ -50,11 +50,6 @@ def alarm_handler(signum, frame):
 	raise Alarm
 
 class ZabbixConnection:
-	__api_url = None
-	__api_user = None
-	__api_pass = None
-	__api_token = None
-
 	def __init__(self, url, user, passwd):
 		self.__api_url = url
 		self.__api_user = user
@@ -119,8 +114,6 @@ class ZabbixConnection:
 		return self.__callAPI(json.dumps(data))
 
 class ZabbixAPI:
-	__zconn = None
-
 	def __init__(self, url, user, passwd):
 		self.__zconn = ZabbixConnection(url, user, passwd)
 
@@ -215,16 +208,43 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot create item %s on host %s' %(item_name, hostname))
 
-	def create_item(self, wg_host, wg_app, item_name, item_key):
+	def create_item(self, hostname, app, item_name, item_key):
+		logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, hostname))
 		try:
-			self.__create_item(wg_host, wg_app, item_name, item_key)
+			self.__create_item(hostname, app, item_name, item_key)
+			return True
 		except ZabbixAPIError as e:
 			logging.warning(e.message)
-			if not self.exists_item(wg_host, item_key):
-				logging.error('No item %s, exiting' % item_key)
-				sys.exit(1)
 
-	def exists_item(self, hostname, item_key):
+			try:
+				if self.__exists_item(hostname, item_key):
+					return True
+				else:
+					logging.error('No item %s' % item_key)
+					return None
+			except ZabbixAPIError as e:
+				logging.error('Cannot check if item exists')
+				return None
+
+	def del_item(self, hostname, item_key):
+		logging.info('API invocation: del item key %s on %s' %(item_key, hostname))
+		try:
+			self.__del_item(hostname, item_key)
+			return True
+		except ZabbixAPIError as e:
+			logging.warning(e.message)
+
+			try:
+				if self.__exists_item(hostname, item_key):
+					logging.error('Cannot delete item %s' % item_key)
+					return None
+				else:
+					return True
+			except ZabbixAPIError as e:
+				logging.error('Cannot check if item exists')
+				return None
+
+	def __exists_item(self, hostname, item_key):
 		req = {
 			'method': 'item.exists',
 			'params': {
@@ -294,14 +314,22 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot create trigger on item key %s on host %s' %(item_key, hostname))
 
-	def create_trigger(self, wg_host, item_key, anomaly):
+	def create_trigger(self, hostname, item_key, anomaly):
 		try:
-			self.__create_trigger(wg_host, item_key, anomaly)
+			self.__create_trigger(hostname, item_key, anomaly)
+			return True
 		except ZabbixAPIError as e:
 			logging.warning(e.message)
-			if not self.__exists_trigger(wg_host, item_key):
-				logging.error('No trigger for item %s, exiting' % item_key)
-				sys.exit(1)
+
+			try:
+				if self.__exists_trigger(hostname, item_key):
+					return True
+				else:
+					logging.error('No trigger for item %s' % item_key)
+					return None
+			except ZabbixAPIError as e:
+				logging.error('Cannot check if trigger exists')
+				return None
 
 	def __exists_trigger(self, hostname, item_key):
 		expression = self.__prepare_trigger_expression(hostname, item_key)
@@ -337,7 +365,7 @@ class ZabbixAPI:
 		except (KeyError, IndexError):
 			raise ZabbixAPIError('Error: cannot find itemid for item key %s on host %s' %(item_key, hostname))
 
-	def del_item(self, hostname, item_key):
+	def __del_item(self, hostname, item_key):
 		itemid = self.__find_itemid(hostname, item_key)
 		req = {
 			'method': 'item.delete',
@@ -351,22 +379,20 @@ class ZabbixAPI:
 			raise ZabbixAPIError('Error: cannot delete item %s on host %s' %(name, hostname))
 
 class Notification:
-	def __init__(self, url, user, passwd):
+	def __init__(self, pd, url, user, passwd):
+		self.__pd = pd
 		self.__load_data()
 		try:
-			self.__zbx = ZabbixAPI(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
+			self.__zbx = ZabbixAPI(url, user, passwd)
 		except ZabbixAPIError as e:
 			logging.error('%s, program execution: %s' %(e.message, ' '.join(sys.argv)))
-			sys.exit(1)
+			raise ZabbixAPIError
 
 	def __load_data(self):
 		self.__zbx_item_name = zbx_item_name
 		self.__zbx_item_key = zbx_item_key
 		self.__wg_host = wg_host
 		self.__wg_app = wg_app
-		self.__statefile = statefile
-		self.__persisted_anomaly_ids = self.__load_anomalies()
-		self.__persisted_anomaly_ids_changed = None
 
 	def __gen_item_key(self, anomaly_id):
 		return '%s.%s' %(self.__zbx_item_key, anomaly_id)
@@ -375,72 +401,49 @@ class Notification:
 		item_name = '%s %s' %(self.__zbx_item_name, anomaly['id'])
 		item_key = self.__gen_item_key(anomaly['id'])
 
-		logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, self.__wg_host))
-		self.__zbx.create_item(self.__wg_host, self.__wg_app, item_name, item_key)
-		self.__zbx.create_trigger(self.__wg_host, item_key, anomaly)
+		if not self.__zbx.create_item(self.__wg_host, self.__wg_app, item_name, item_key):
+			return None
 
-	def __del_notification(self, item_key):
-		try:
-			self.__zbx.del_item(self.__wg_host, item_key)
-			return True
-		except ZabbixAPIError as e:
-			logging.warning(e.message)
+		if not self.__zbx.create_trigger(self.__wg_host, item_key, anomaly):
+			return None
 
-			#return None
-
-			try:
-				if self.__zbx.exists_item(self.__wg_host, item_key):
-					logging.error('Cannot delete item %s' % item_key)
-					return None
-				else:
-					return True
-			except ZabbixAPIError as e:
-				logging.error(e.message)
+		return True
 
 	def del_notification(self, anomaly):
 		item_key = self.__gen_item_key(anomaly['id'])
 
-		logging.info('API invocation: del item key %s on %s (%s)' %(item_key, self.__wg_host, self.__wg_app))
-		if self.__del_notification(item_key):
-			self.__remove_anomaly_id(anomaly['id'])
+		if self.__zbx.del_item(self.__wg_host, item_key):
+			return True
 		else:
-			self.__append_anomaly_id(anomaly['id'])
+			return None
 
 	def clean_notification(self):
-		a = []
-		for id in self.__persisted_anomaly_ids:
-			if not self.__del_notification(self.__gen_item_key(id)):
-				a.append(id)
+		self.__pd.priority_anomalies()
+		for a in self.__pd.get_anomalies():
+			if a['action'] == 'add':
+				if self.add_notification(a):
+					self.__pd.del_anomaly(a['id'])
+			elif a['action'] == 'del':
+				if self.del_notification(a):
+					self.__pd.del_anomaly(a['id'])
 
-		if len(self.__persisted_anomaly_ids) != len(a):
-			self.__persisted_anomaly_ids = a
-			self.__persisted_anomaly_ids_changed = True
+		self.__pd.save_anomalies()
 
-		self.__persists_anomalies()
+class PersistData:
+	def __init__(self):
+		self.__statefile = statefile
+		self.__data_changed = None
+		self.__anomalies = self.__load_anomalies()
 
-	def __append_anomaly_id(self, id):
-		if id not in self.__persisted_anomaly_ids:
-			self.__persisted_anomaly_ids.append(id)
-			self.__persisted_anomaly_ids_changed = True
+	def get_anomalies(self):
+		return self.__anomalies
 
-	def __remove_anomaly_id(self, id):
-		if id in self.__persisted_anomaly_ids:
-			try:
-				self.__persisted_anomaly_ids.remove(id)
-				self.__persisted_anomaly_ids_changed = True
-			except ValueError:
-				pass
+	def save_anomalies(self):
+		if not self.__data_changed:
+			return
 
-	def __persists_anomalies(self):
-		if self.__persisted_anomaly_ids_changed:
-			self.__store_anomalies(self.__persisted_anomaly_ids)
-
-	def __store_anomalies(self, anomalies):
-		if anomalies:
-			a = ', '.join(anomalies)
-		else:
-			a = 'none'
-		logging.debug('Storing faulty anomalies: %s' % a)
+		if self.__anomalies:
+			logging.debug('Saving faulty anomalies: %s' % self.__flatten_anomalies(self.__anomalies))
 
 		tmpfile = self.__statefile + '-' + str(os.getpid())
 
@@ -448,39 +451,94 @@ class Notification:
 			file = open(tmpfile, 'w')
 		except IOError:
 			logging.error('Cannot open file %s for writing' % tmpfile)
+			return
 
 		try:
-			pickle.dump(anomalies, file)
-
-			# atomic write
+			pickle.dump(self.__anomalies, file)
+		except IOError:
+			logging.error('Cannot write file %s' % tmpfile)
+		except pickle.PicklingError:
+			logging.error('Pickling error')
+		else:
+			# attempt to emulate atomic write
 			file.flush()
 			os.fsync(file)
 			file.close()
 			os.rename(tmpfile, self.__statefile)
-		except IOError:
-			logging.error('Cannot write file %s' % tmpfile)
-			file.close()
-		except PicklingError:
-			logging.error('Wrong data format')
+		finally:
 			file.close()
 
 	def __load_anomalies(self):
 		try:
 			file = open(self.__statefile, 'r')
 		except IOError:
+			logging.debug('Cannot open file %s for reading' % self.__statefile)
 			return []
+
 		try:
 			a = pickle.load(file)
+		except (pickle.UnpicklingError, AttributeError, EOFError, ImportError, IndexError):
+			logging.error('Unpickling error')
 			file.close()
-			if a:
-				logging.debug('Loaded faulty anomalies: %s' % ', '.join(a))
-				return a
-			else:
-				logging.debug('No faulty anomalies to load')
-				return []
-		except UnpicklingError:
 			os.remove(self.__statefile)
 			return []
+		finally:
+			file.close()
+
+		if a:
+			logging.debug('Loaded faulty anomalies: %s' % self.__flatten_anomalies(a))
+			return a
+		else:
+			return []
+
+	def __flatten_anomalies(self, anomalies):
+		f = []
+		for a in anomalies:
+			f.append('%s %s' %(a['id'], a['action']))
+		return ', '.join(f)
+
+	def add_anomaly(self, anomaly):
+		exists = None
+		for a in self.__anomalies:
+			if anomaly['id'] == a['id'] and (anomaly['action'] == a['action'] or a['action'] == 'del'):
+				exists = True
+				break
+
+		if not exists:
+			self.__anomalies.append(anomaly)
+			self.__data_changed = True
+
+	def priority_anomalies(self):
+		dups = {}
+		for a in self.__anomalies:
+			if a['id'] in dups:
+				dups[a['id']] += 1
+			else:
+				dups[a['id']] = 1
+
+		for key, value in dups.iteritems():
+			if value > 1:
+				self.__del_dup_anomalies(key)
+
+	def __del_dup_anomalies(self, id):
+		anomalies_new = []
+		for a in self.__anomalies:
+			if a['id'] != id or (a['id'] == id and a['action'] != 'add'):
+				anomalies_new.append(a)
+
+		if len(self.__anomalies) != len(anomalies_new):
+			self.__anomalies = anomalies_new
+			self.__data_changed = True
+
+	def del_anomaly(self, id):
+		anomalies_new = []
+		for a in self.__anomalies:
+			if a['id'] != id:
+				anomalies_new.append(a)
+
+		if len(self.__anomalies) != len(anomalies_new):
+			self.__anomalies = anomalies_new
+			self.__data_changed = True
 
 ## MAIN
 
@@ -515,6 +573,7 @@ if len(sys.argv) != 2 and len(sys.argv) != 3 and len(sys.argv) != 9:
 action = sys.argv[1]
 if action == 'add':
 	anomaly = {
+		'action': sys.argv[1],
 		'id': sys.argv[2],
 		'sensor': sys.argv[3],
 		'direction': sys.argv[4],
@@ -523,19 +582,29 @@ if action == 'add':
 		'unit': sys.argv[7],
 		'severity': sys.argv[8],
 	}
-
 elif action == 'del':
-	anomaly = {'id': sys.argv[2]}
+	anomaly = {
+		'action': sys.argv[1],
+		'id': sys.argv[2],
+	}
 elif action == 'clean':
 	pass
 else:
 	usage()
 
-n = Notification(conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
+pd = PersistData()
+try:
+	n = Notification(pd, conf['zabbix_api_url'], conf['zabbix_api_user'], conf['zabbix_api_pass'])
+except ZabbixAPIError:
+	pd.add_anomaly(anomaly)
+	pd.save_anomalies()
+	sys.exit(1)
 
 if action == 'add':
-	n.add_notification(anomaly)
+	if not n.add_notification(anomaly):
+		pd.add_anomaly(anomaly)
 elif action == 'del':
-	n.del_notification(anomaly)
+	if not n.del_notification(anomaly):
+		pd.add_anomaly(anomaly)
 
 n.clean_notification()
