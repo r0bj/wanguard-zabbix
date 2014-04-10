@@ -476,6 +476,7 @@ class PersistData:
 			file = open(self.__statefile, 'r')
 		except IOError:
 			logging.debug('Cannot open file %s for reading' % self.__statefile)
+			self.__save_anomalies([])
 			return []
 
 		try:
