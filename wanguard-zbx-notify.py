@@ -209,7 +209,7 @@ class ZabbixAPI:
 			raise ZabbixAPIError('Error: cannot create item %s on host %s' %(item_name, hostname))
 
 	def create_item(self, hostname, app, item_name, item_key):
-		logging.debug('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, hostname))
+		logging.info('API invocation: create item: %s, item key %s on %s' %(item_name, item_key, hostname))
 		try:
 			self.__create_item(hostname, app, item_name, item_key)
 			return True
@@ -307,7 +307,7 @@ class ZabbixAPI:
 			},
 		}
 
-		logging.debug('API invocation: create trigger on item key: %s: %s' %(item_key, name))
+		logging.info('API invocation: create trigger on item key: %s: %s' %(item_key, name))
 		result = self.__zconn.send(req)
 		try:
 			return result['triggerids'][0]
@@ -561,7 +561,9 @@ requests_log = logging.getLogger('requests')
 requests_log.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', filename=logfile, level=logging.DEBUG)
 
-logging.debug('Program execution: ' + ' '.join(sys.argv))
+if sys.argv[1] != 'clean':
+	logging.debug('Program execution: ' + ' '.join(sys.argv))
+
 conf = parse_config(conf_file)
 
 if not isinstance(conf, dict) or 'zabbix_api_host' not in conf or 'zabbix_api_user' not in conf or 'zabbix_api_pass' not in conf:
